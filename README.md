@@ -1,1 +1,1 @@
-# MySQL-Data-Anonymizer
+# MySQL Data Anonymizer
