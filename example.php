@@ -1,19 +1,19 @@
-#!/usr/bin/env php
 <?php
 
-use Globalis\MysqlDataAnonymizer\Anonymizer;
-use Globalis\MysqlDataAnonymizer\Blueprint;
-
 require './vendor/autoload.php';
+use Globalis\MysqlDataAnonymizer\Anonymizer;
 
 $anonymizer = new Anonymizer();
 
 // Describe `users` table.
-$anonymizer->table('users', function (Blueprint $table) {
+$anonymizer->table('users', function ($table) {
+    
     // Specify a primary key of the table. An array should be passed in for composite key.
-    // This step can be skipped if you have `id` as a primary key.
-    // You can change default primary key for all tables with `Blueprint::setDefaultPrimary('ID')`
     $table->primary('id');
+
+    // Add a global filter to the queries.
+    // Only string is accepted so you need to write down the comlete WHERE statement here.
+    $table->globalWhere('email4 != email5 AND id != 10');
 
     // Replace with static data.
     $table->column('email1')->replaceWith('john@example.com');
@@ -22,8 +22,8 @@ $anonymizer->table('users', function (Blueprint $table) {
     $table->column('email2')->replaceWith('email_#row#@example.com');
 
     // To replace with dynamic data a $generator is needed.
+    // By default, a fzaninotto/Faker generator will be used. 
     // Any generator object can be set like that - `$anonymizer->setGenerator($generator);`
-    // A simpler way is just to do `require fzaninotto/Faker` and it will be set automatically.
     $table->column('email3')->replaceWith(function ($generator) {
         return $generator->email;
     });
@@ -32,6 +32,13 @@ $anonymizer->table('users', function (Blueprint $table) {
     // If you don't list a column here, it will be left untouched too.
     $table->column('email4')->where('ID != 1')->replaceWith(function ($generator) {
         return $generator->unique()->email;
+    });
+
+    // Use the values of current row to update a field
+    // This is a position sensitive operation, so the value of field 'email4' here is the updated value.
+    // So if you put this line before the previous one, the value of 'email4' here would be the valeu of 'email4' before update.
+    $table->column('email5')->replaceByFields(function ($rowData) {
+        return $rowData['email4'];
     });
 });
 

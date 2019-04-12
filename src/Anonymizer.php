@@ -45,6 +45,7 @@ class Anonymizer
     public function __construct($generator = null)
     {
     	$this->config = require __DIR__ . "/../config/config.php";
+
         $this->mysql_pool = Mysql\pool(Mysql\ConnectionConfig::fromString("host=".$this->config['DB_HOST'].";user=".$this->config['DB_USER'].";pass=".$this->config['DB_PASSWORD'].";db=". $this->config['DB_NAME']), $this->config['NB_MAX_MYSQL_CLIENT'] ?? 20);
 
         if (is_null($generator) && class_exists('\Faker\Factory')) {
@@ -94,8 +95,8 @@ class Anonymizer
                 $selectData = yield $this->getSelectData($table, $blueprint);
                 $rowNum = 0;
 
+                //Update every line selected
                 while (yield $selectData->advance()) {
-
                     $row = $selectData->getCurrent();
                     $promises[] = $this->updateByPrimary(
                         $blueprint->table,
@@ -106,6 +107,7 @@ class Anonymizer
                     $rowNum ++;
                     $promise_count ++;
 
+                    //Wait for all the results of SQL queries and clear the promise table
                     if($promise_count === $this->config['NB_MAX_PROMISE_IN_LOOP']) {
                         yield \Amp\Promise\all($promises);
                         $promises = [];
@@ -182,9 +184,20 @@ class Anonymizer
         return call_user_func($replace, $this->generator);
     }
 
-    public function updateByPrimary($table, $primaryKeyValue, $columns, $rowNum, $row)
+    /**
+     * Update a line by primary key given
+     *
+     * @param array $table
+     * @param array $primaryKeyValues
+     * @param array $columns
+     * @param int $rowNum
+     * @param array $row
+     *
+     * @return promise
+     */
+    public function updateByPrimary($table, $primaryKeyValues, $columns, $rowNum, $row)
     {
-        $where = $this->buildWhereForArray($primaryKeyValue);
+        $where = $this->buildWhereForArray($primaryKeyValues);
 
         $set = $this->buildSetForArray($columns, $rowNum, $row);
 
@@ -198,6 +211,14 @@ class Anonymizer
         return $this->mysql_pool->query($sql);
     }
 
+    /**
+     * Get lines that need to be updated
+     *
+     * @param array $table
+     * @param Blueprint $blueprint
+     *
+     * @return promise
+     */
     protected function getSelectData($table, $blueprint)
     {
         foreach ($blueprint->columns as $column) {
@@ -212,8 +233,8 @@ class Anonymizer
         }
         $sql = "SELECT {$columns} FROM {$table}";
 
-        if(!empty($blueprint->globalWhere)) {
-            $sql .= " WHERE " . implode(" AND ", $blueprint->globalWhere);
+        if($blueprint->globalWhere) {
+            $sql .= " WHERE " . $blueprint->globalWhere;
         }
 
         return $this->mysql_pool->query($sql);
@@ -237,7 +258,7 @@ class Anonymizer
     }
 
     /**
-     * Build SQL where for key-value array.
+     * Build SQL set for key-value array.
      *
      * @param array $primaryKeyValue
      *

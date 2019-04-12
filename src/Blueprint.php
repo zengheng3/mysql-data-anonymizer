@@ -37,7 +37,7 @@ class Blueprint
      *
      * @var array
      */
-    public $globalWhere = [];
+    public $globalWhere = null;
 
     /**
      * Current column.
