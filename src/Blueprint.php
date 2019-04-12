@@ -85,9 +85,10 @@ class Blueprint
     public function column($name)
     {
         $this->currentColumn = [
-            'name'    => $name,
-            'where'   => null,
-            'replace' => null,
+            'name'            => $name,
+            'where'           => null,
+            'replace'         => null,
+            'replaceByFields' => null
         ];
 
         return $this;
@@ -131,6 +132,20 @@ class Blueprint
     public function replaceWith($callback)
     {
         $this->currentColumn['replace'] = $callback;
+
+        $this->columns[] = $this->currentColumn;
+    }
+
+    /**
+     * Set how data should be replaced.
+     *
+     * @param callable|string $callback
+     *
+     * @return void
+     */
+    public function replaceByFields($callback)
+    {
+        $this->currentColumn['replaceByFields'] = $callback;
 
         $this->columns[] = $this->currentColumn;
     }

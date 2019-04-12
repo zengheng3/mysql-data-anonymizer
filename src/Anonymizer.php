@@ -91,24 +91,18 @@ class Anonymizer
             $promises = [];
             $promise_count = 0;
             foreach ($this->blueprints as $table => $blueprint) {
-                $columns = implode(',', array_merge($blueprint->primary, array_column($blueprint->columns, 'name')));
-                $sql = "SELECT {$columns} FROM {$table}";
-
-                if(!empty($blueprint->globalWhere)) {
-                    $sql .= " WHERE " . implode(" AND ", $blueprint->globalWhere);
-                }
-
-                $result = yield $this->mysql_pool->query($sql);
+                $selectData = yield $this->getSelectData($table, $blueprint);
                 $rowNum = 0;
 
-                while (yield $result->advance()) {
+                while (yield $selectData->advance()) {
 
-                    $row = $result->getCurrent();
+                    $row = $selectData->getCurrent();
                     $promises[] = $this->updateByPrimary(
                         $blueprint->table,
                         Helpers::arrayOnly($row, $blueprint->primary),
                         $blueprint->columns,
-                        $rowNum);
+                        $rowNum,
+                        $row);
                     $rowNum ++;
                     $promise_count ++;
 
@@ -188,11 +182,11 @@ class Anonymizer
         return call_user_func($replace, $this->generator);
     }
 
-    public function updateByPrimary($table, $primaryKeyValue, $columns, $rowNum)
+    public function updateByPrimary($table, $primaryKeyValue, $columns, $rowNum, $row)
     {
         $where = $this->buildWhereForArray($primaryKeyValue);
 
-        $set = $this->buildSetForArray($columns, $rowNum);
+        $set = $this->buildSetForArray($columns, $rowNum, $row);
 
         $sql = "UPDATE
                     {$table}
@@ -200,6 +194,27 @@ class Anonymizer
                     {$set}
                 WHERE
                     {$where}";
+
+        return $this->mysql_pool->query($sql);
+    }
+
+    protected function getSelectData($table, $blueprint)
+    {
+        foreach ($blueprint->columns as $column) {
+            if ($column['replaceByFields']) {
+                $columns = '*';
+                break;
+            }
+        }
+
+        if($columns ?? false) {
+            $columns = implode(',', array_merge($blueprint->primary, array_column($blueprint->columns, 'name')));
+        }
+        $sql = "SELECT {$columns} FROM {$table}";
+
+        if(!empty($blueprint->globalWhere)) {
+            $sql .= " WHERE " . implode(" AND ", $blueprint->globalWhere);
+        }
 
         return $this->mysql_pool->query($sql);
     }
@@ -228,22 +243,30 @@ class Anonymizer
      *
      * @return string
      */
-    protected function buildSetForArray($columns, $rowNum)
+    protected function buildSetForArray($columns, $rowNum, $row)
     {
         $set = [];
         foreach ($columns as $column) {
-            $newData = $this->calculateNewValue($column['replace'], $rowNum);
+
+            if ($column['replaceByFields']) {
+                $row[$column['name']] = call_user_func($column['replaceByFields'], $row);
+            }
+
+            if ($column['replace']) {
+                $row[$column['name']] = $this->calculateNewValue($column['replace'], $rowNum);
+            }
 
             if (empty($column['where'])) {
-                $set[] = "{$column['name']}='{$newData}'";
+                $set[] = "{$column['name']}='{$row[$column['name']]}'";
             } else {
                 $set[] = "{$column['name']}=(
                     CASE 
-                      WHEN {$column['where']} THEN '{$newData}'
+                      WHEN {$column['where']} THEN '{$row[$column['name']]}'
                       ELSE {$column['name']}
                     END)";
             }
         }
+
         return implode(' ,', $set);
     }
 }
