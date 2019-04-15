@@ -1,8 +1,8 @@
 <?php
 
-namespace Globalis\MysqlDataAnonymizer;
+namespace Globalis\MysqlDataAnonymizer\Helpers;
 
-class Helpers
+class GeneralHelper
 {
     /**
      * Array only.

@@ -37,7 +37,7 @@ $anonymizer->table('users', function ($table) {
     // Use the values of current row to update a field
     // This is a position sensitive operation, so the value of field 'email4' here is the updated value.
     // So if you put this line before the previous one, the value of 'email4' here would be the valeu of 'email4' before update.
-    $table->column('email5')->replaceByFields(function ($rowData) {
+    $table->column('email5')->replaceByFields(function ($rowData, $generator) {
         return $rowData['email4'];
     });
 });

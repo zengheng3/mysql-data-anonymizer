@@ -6,6 +6,7 @@ use Amp;
 use Amp\Promise;
 use Amp\Mysql;
 use Exception;
+use Globalis\MysqlDataAnonymizer\Helpers;
 
 class Anonymizer
 {
@@ -44,7 +45,8 @@ class Anonymizer
      */
     public function __construct($generator = null)
     {
-    	$this->config = require __DIR__ . "/../config/config.php";
+    	$this->load_config();
+        $this->load_helpers();
 
         $this->mysql_pool = Mysql\pool(Mysql\ConnectionConfig::fromString("host=".$this->config['DB_HOST'].";user=".$this->config['DB_USER'].";pass=".$this->config['DB_PASSWORD'].";db=". $this->config['DB_NAME']), $this->config['NB_MAX_MYSQL_CLIENT'] ?? 20);
 
@@ -54,6 +56,33 @@ class Anonymizer
 
         if (!is_null($generator)) {
             $this->setGenerator($generator);
+        }
+        $this->load_providers();
+    }
+
+    protected function load_config()
+    {
+        $this->config = require __DIR__ . "/../config/config.php";
+    }
+
+
+    protected function load_helpers()
+    {
+        foreach (glob(__DIR__ . "/helpers/*Helper.php") as $filename)
+        {
+            require_once $filename;
+        }
+    }
+
+    protected function load_providers()
+    {
+        foreach (glob(__DIR__ . "/providers/*Provider.php") as $filename)
+        {
+            require_once $filename;
+            $className = "\\Globalis\\MysqlDataAnonymizer\\Provider\\" . basename($filename, ".php");
+            if (class_exists($className)) {
+                $this->generator->addProvider(new $className($this->generator));
+            }
         }
     }
 
@@ -100,7 +129,7 @@ class Anonymizer
                     $row = $selectData->getCurrent();
                     $promises[] = $this->updateByPrimary(
                         $blueprint->table,
-                        Helpers::arrayOnly($row, $blueprint->primary),
+                        Helpers\GeneralHelper::arrayOnly($row, $blueprint->primary),
                         $blueprint->columns,
                         $rowNum,
                         $row);
@@ -270,7 +299,7 @@ class Anonymizer
         foreach ($columns as $column) {
 
             if ($column['replaceByFields']) {
-                $row[$column['name']] = call_user_func($column['replaceByFields'], $row);
+                $row[$column['name']] = call_user_func($column['replaceByFields'], $row, $this->generator);
             }
 
             if ($column['replace']) {

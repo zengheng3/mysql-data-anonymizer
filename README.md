@@ -12,6 +12,7 @@ MySQL Data Anonymizer requires PHP >= 7.0.
 
 - [Configuration](#configuration)
 - [Example code](#example-code)
+- [Helpers and providers](#helpers-and-providers)
 
 
 
@@ -92,3 +93,79 @@ echo 'Anonymization has been completed!';
 ```
 
 For more fake data types and details about fake data generator, you can find what you want from [fzaninotto/Faker's Github page](https://github.com/fzaninotto/Faker)
+
+
+## Helpers and providers
+
+You can add your own helper and generator classes in src/helpers and src/providers. File names of helpers and providers need to keep these format : 'XXXHelper.php', 'XXXProvider.php', or they won't be loaded.
+
+An example of customize helper:
+
+```php
+<?php
+
+namespace Globalis\MysqlDataAnonymizer\Helpers; //Default namespace, should always use this one
+
+class StrHelper //Class name needs to be the same as file name
+{
+    public static function toLower($string)
+    {
+        return strtolower($string);
+    }
+}
+```
+
+Then in your script, you can use it like this:
+```php
+<?php
+
+require './vendor/autoload.php';
+use Globalis\MysqlDataAnonymizer\Anonymizer;
+use Globalis\MysqlDataAnonymizer\Helpers;
+
+$anonymizer = new Anonymizer();
+
+$anonymizer->table('users', function ($table) {
+    
+    $table->primary('id');
+    $table->column('name')->replaceByFields(function ($rowData, $generator) {
+        return Helpers\StrHelper::toLower(($rowData['name']));
+    });
+}
+```
+
+An example of customize provider:
+```php
+<?php
+
+namespace Globalis\MysqlDataAnonymizer\Provider; //Default namespace, should always use this one
+
+class EnumProvider extends \Faker\Provider\Base //Class name needs to be the same as file name, and provider classes need to extend \Faker\Provider\Base
+{
+
+    //This simple method returns a fruit randomly from the list
+    public function fruit()
+    {
+        $enum = ['apple', 'orange', 'banana'];
+
+        return $enum[rand(0, 2)];
+    }
+}
+```
+
+Then in your script, you can use it like this:
+```php
+<?php
+
+require './vendor/autoload.php';
+use Globalis\MysqlDataAnonymizer\Anonymizer;
+
+$anonymizer = new Anonymizer();
+
+$anonymizer->table('users', function ($table) {
+    $table->primary('id');
+    $table->column('favorite_fruit')->replaceWith(function ($generator) {
+        return $generator->fruit;
+    });
+}
+```

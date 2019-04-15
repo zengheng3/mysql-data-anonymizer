@@ -7,3 +7,9 @@
 # composer installed dependencies
 **/vendor/*
 **/vendor
+
+/src/providers/*
+/src/helpers/*
+
+!/src/helpers/GeneralHelper.php
+!/src/providers/.gitkeep
