@@ -47,6 +47,20 @@ class Blueprint
     protected $currentColumn = [];
 
     /**
+     * The columns that need be synchronized.
+     *
+     * @var array
+     */
+    public $synchroColumns = [];
+
+    /**
+     * The foreign keys that need be restored.
+     *
+     * @var array
+     */
+    public $foreignKeys = [];
+
+    /**
      * Callback that builds blueprint.
      *
      * @var callable
@@ -134,7 +148,48 @@ class Blueprint
         $this->currentColumn['replace'] = $callback;
 
         $this->columns[] = $this->currentColumn;
+
+        return $this;
     }
+
+    /**
+     * Save all columns that need to be synchronized..
+     *
+     * @param array $synchroData
+     *
+     * @return void
+     */
+    public function synchronizeColumn()
+    {
+        $synchroData = (array) func_get_args();
+
+        if (!isset($this->synchroColumns[$this->currentColumn['name']])) {
+            $this->synchroColumns[$this->currentColumn['name']] = [];
+        }
+
+        foreach ($synchroData as $synchroField) {
+            $this->synchroColumns[$this->currentColumn['name']][] = [
+                'field'           => $synchroField[0],
+                'table'           => $synchroField[1] ?? $this->table,
+                'database'        => $synchroField[2] ?? null,
+            ];
+        }
+
+        return $this;
+    }
+
+    /**
+     * Back up a foreign key.
+     *
+     * @param callable|string $callback
+     *
+     * @return void
+     */
+    public function backUpForeignKey($foreign_key)
+    {
+        $this->foreignKeys[] = $foreign_key;
+    }
+
 
     /**
      * Set how data should be replaced.

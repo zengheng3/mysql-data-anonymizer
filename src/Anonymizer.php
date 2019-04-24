@@ -121,28 +121,48 @@ class Anonymizer
             $promises = [];
             $promise_count = 0;
             foreach ($this->blueprints as $table => $blueprint) {
+                $results = [];
+                $foreign_keys = yield $this->getRelatedForeignKeys($blueprint);
+                while (yield $foreign_keys->advance()) {
+                    $results[] = $foreign_keys->getCurrent();
+                }
+
+                $blueprint = $this->filterAndBackUpForeignKeys($results, $blueprint);
+
+                foreach ($blueprint->foreignKeys as $foreignKey) {
+                    yield $this->removeForeignKey($foreignKey);
+                }
+
                 $selectData = yield $this->getSelectData($table, $blueprint);
                 $rowNum = 0;
 
                 //Update every line selected
                 while (yield $selectData->advance()) {
                     $row = $selectData->getCurrent();
-                    $promises[] = $this->updateByPrimary(
-                        $blueprint->table,
+                    $currentResults = $this->updateByPrimary(
+                        $blueprint,
                         Helpers\GeneralHelper::arrayOnly($row, $blueprint->primary),
                         $blueprint->columns,
                         $rowNum,
                         $row);
-                    $rowNum ++;
-                    $promise_count ++;
+                    foreach($currentResults as $currentResult) {
+                        $promises[] = $currentResult;
+                        $promise_count ++;
 
-                    //Wait for all the results of SQL queries and clear the promise table
-                    if($promise_count === $this->config['NB_MAX_PROMISE_IN_LOOP']) {
-                        yield \Amp\Promise\all($promises);
-                        $promises = [];
-                        $promise_count = 0;
+                        //Wait for all the results of SQL queries and clear the promise table
+                        if($promise_count > $this->config['NB_MAX_PROMISE_IN_LOOP']) {
+                            yield \Amp\Promise\all($promises);
+                            $promises = [];
+                            $promise_count = 0;
+                        }
                     }
+                    $rowNum ++;
                 }
+
+                foreach ($blueprint->foreignKeys as $foreignKey) {
+                    yield $this->restoreForeignKey($foreignKey);
+                }
+                $blueprint->foreignKeys = [];
             }
         });
     }
@@ -216,7 +236,7 @@ class Anonymizer
     /**
      * Update a line by primary key given
      *
-     * @param array $table
+     * @param array $blueprint
      * @param array $primaryKeyValues
      * @param array $columns
      * @param int $rowNum
@@ -224,20 +244,30 @@ class Anonymizer
      *
      * @return promise
      */
-    public function updateByPrimary($table, $primaryKeyValues, $columns, $rowNum, $row)
+    public function updateByPrimary($blueprint, $primaryKeyValues, $columns, $rowNum, $row)
     {
         $where = $this->buildWhereForArray($primaryKeyValues);
 
-        $set = $this->buildSetForArray($columns, $rowNum, $row);
+        $setResults = $this->buildSetForArray($blueprint, $columns, $rowNum, $row);
 
         $sql = "UPDATE
-                    {$table}
+                    {$blueprint->table}
                 SET
-                    {$set}
+                    {$setResults['set']}
                 WHERE
                     {$where}";
 
-        return $this->mysql_pool->query($sql);
+        $returnPromises = [];
+        $returnPromises[] = $this->mysql_pool->query($sql);
+        if(!empty($setResults['synchro'])) {
+            yield $this->mysql_pool->query($sql);
+            foreach ($setResults['synchro'] as $synchroStatement) {
+                $returnPromises[] = $this->mysql_pool->query($synchroStatement);
+            }
+        } else {
+            $returnPromises[] = $this->mysql_pool->query($sql);
+        }
+        return $returnPromises;
     }
 
     /**
@@ -246,7 +276,7 @@ class Anonymizer
      * @param array $table
      * @param Blueprint $blueprint
      *
-     * @return promise
+     * @return Promise
      */
     protected function getSelectData($table, $blueprint)
     {
@@ -293,11 +323,13 @@ class Anonymizer
      *
      * @return string
      */
-    protected function buildSetForArray($columns, $rowNum, $row)
+    protected function buildSetForArray($blueprint, $columns, $rowNum, $row)
     {
         $set = [];
+        $synchroStatements = [];
         foreach ($columns as $column) {
 
+            $originalData = $row[$column['name']];
             if ($column['replaceByFields']) {
                 $row[$column['name']] = call_user_func($column['replaceByFields'], $row, $this->generator);
             }
@@ -315,8 +347,155 @@ class Anonymizer
                       ELSE {$column['name']}
                     END)";
             }
+
+            if (isset($blueprint->synchroColumns[$column['name']]) && $originalData !== $row[$column['name']]) {
+                foreach($blueprint->synchroColumns[$column['name']] as $index => $columnInfo) {
+                    $synchroStatements[] = $this->buildSynchroStatement($columnInfo, $row[$column['name']], $originalData);
+                }
+            }
         }
 
-        return implode(' ,', $set);
+        return [
+            'set' => implode(' ,', $set),
+            'synchro' => $synchroStatements
+        ];
+    }
+
+
+    /**
+     * Build SQL statement for fields need synchonization
+     *
+     * @param Blueprint $blueprint
+     * @param string $newData
+     * @param string $originalData
+     *
+     * @return string
+     */
+    protected function buildSynchroStatement($columnInfo, $newData, $originalData)
+    {
+        if($columnInfo['table'] && $columnInfo['database']) {
+            $table = $columnInfo['database'] . '.' . $columnInfo['table']; 
+        } else {
+            $table = $columnInfo['table'];
+        }
+
+        $sql = "UPDATE
+                    {$table}
+                SET
+                    {$columnInfo['field']}='{$newData}'
+                WHERE
+                    {$columnInfo['field']}='{$originalData}'";
+
+        return $sql;
+    }
+
+
+    /**
+     * Get the information of all foreign keys related to current table
+     *
+     * @param Blueprint $blueprint
+     *
+     * @return Promise
+     */
+    protected function getRelatedForeignKeys($blueprint)
+    {
+        $sql = "
+            SELECT
+                key_column.CONSTRAINT_NAME,
+                key_column.TABLE_SCHEMA,
+                key_column.TABLE_NAME,
+                key_column.COLUMN_NAME,
+                key_column.REFERENCED_TABLE_SCHEMA,
+                key_column.REFERENCED_TABLE_NAME,
+                key_column.REFERENCED_COLUMN_NAME,
+                referential_constraints.UPDATE_RULE,
+                referential_constraints.DELETE_RULE
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE key_column
+            JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS referential_constraints ON key_column.CONSTRAINT_NAME = referential_constraints.CONSTRAINT_NAME
+            WHERE key_column.REFERENCED_TABLE_SCHEMA = '{$this->config['DB_NAME']}'
+                AND referential_constraints.UNIQUE_CONSTRAINT_SCHEMA = '{$this->config['DB_NAME']}'
+                AND key_column.REFERENCED_TABLE_NAME = '{$blueprint->table}'
+        ";
+
+        return $this->mysql_pool->query($sql);
+    }
+
+    /**
+     * Ignore all foreign keys which automatically update the values and save other foreign keys' info into an array 
+     *
+     * @param array $foreignKey
+     * @param Blueprint $blueprint
+     *
+     * @return Promise
+     */
+    protected function filterAndBackUpForeignKeys($foreignKey, $blueprint)
+    {
+        foreach($blueprint->synchroColumns as $currentColumnName => &$synchroColumn) {
+            foreach ($synchroColumn as $index => &$column) {
+                if(!$column['database']) {
+                    $column['database'] = $this->config['DB_NAME'];
+                }
+
+                $search = array_filter($foreignKey, function($value) use ($currentColumnName, $column, $blueprint) {
+                    return $value['TABLE_SCHEMA'] === $column['database'] && $value['TABLE_NAME'] === $column['table'] && $value['COLUMN_NAME'] === $column['field'] && $value['REFERENCED_COLUMN_NAME'] === $currentColumnName && $value['REFERENCED_TABLE_NAME'] === $blueprint->table && $value['REFERENCED_TABLE_SCHEMA'] === $this->config['DB_NAME'];
+                });
+
+                if(count($search)) {
+                    if($search[0]['UPDATE_RULE'] === 'CASCADE') {
+                        unset($synchroColumn[$index]);
+                    } else {
+                        $blueprint->backUpForeignKey($search[0]);
+                    }
+                }
+            }
+
+            if(empty($synchroColumn)) {
+                unset($blueprint->synchroColumns[$currentColumnName]);
+            }
+        }
+
+        return $blueprint;
+    }
+
+    /**
+     * Drop a foreign key
+     *
+     * @param array $foreignKey
+     *
+     * @return Promise
+     */
+    protected function removeForeignKey($foreignKey)
+    {
+        $table_name = $foreignKey['TABLE_SCHEMA'] . '.' . $foreignKey['TABLE_NAME'];
+        $sql = "
+                ALTER TABLE {$table_name}
+                DROP FOREIGN KEY {$foreignKey['CONSTRAINT_NAME']}
+        ";
+
+        return $this->mysql_pool->query($sql);
+    }
+
+
+     /**
+     * Retore a foreign key by the information stored in the blueprint
+     *
+     * @param array $foreignKey
+     *
+     * @return Promise
+     */
+    protected function restoreForeignKey($foreignKey)
+    {
+        $table_name = $foreignKey['TABLE_SCHEMA'] . '.' . $foreignKey['TABLE_NAME'];
+        $source_table_name = $foreignKey['REFERENCED_TABLE_SCHEMA'] . '.' . $foreignKey['REFERENCED_TABLE_NAME'];
+        $sql = "
+                ALTER TABLE {$table_name}
+                ADD CONSTRAINT {$foreignKey['CONSTRAINT_NAME']}
+                FOREIGN KEY ({$foreignKey['COLUMN_NAME']}) 
+                REFERENCES {$source_table_name}({$foreignKey['REFERENCED_COLUMN_NAME']}) 
+                ON DELETE {$foreignKey['DELETE_RULE']} 
+                ON UPDATE {$foreignKey['UPDATE_RULE']}
+        ";
+
+        return $this->mysql_pool->query($sql);
     }
 }
