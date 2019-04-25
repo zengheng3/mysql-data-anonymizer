@@ -61,6 +61,13 @@ class Blueprint
     public $foreignKeys = [];
 
     /**
+     * Names of triggers created.
+     *
+     * @var array
+     */
+    public $triggers = [];
+
+    /**
      * Callback that builds blueprint.
      *
      * @var callable

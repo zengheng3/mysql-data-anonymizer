@@ -133,36 +133,43 @@ class Anonymizer
                     yield $this->removeForeignKey($foreignKey);
                 }
 
+                foreach ($blueprint->synchroColumns as $column_name => $data) {
+                    yield $this->addUpdateTrigger($blueprint, $column_name, $data);
+                }
+
                 $selectData = yield $this->getSelectData($table, $blueprint);
                 $rowNum = 0;
 
                 //Update every line selected
                 while (yield $selectData->advance()) {
                     $row = $selectData->getCurrent();
-                    $currentResults = $this->updateByPrimary(
+                    $promises[] = $this->updateByPrimary(
                         $blueprint,
                         Helpers\GeneralHelper::arrayOnly($row, $blueprint->primary),
                         $blueprint->columns,
                         $rowNum,
                         $row);
-                    foreach($currentResults as $currentResult) {
-                        $promises[] = $currentResult;
-                        $promise_count ++;
 
-                        //Wait for all the results of SQL queries and clear the promise table
-                        if($promise_count > $this->config['NB_MAX_PROMISE_IN_LOOP']) {
-                            yield \Amp\Promise\all($promises);
-                            $promises = [];
-                            $promise_count = 0;
-                        }
-                    }
+                    $promise_count ++;
                     $rowNum ++;
+
+                    //Wait for all the results of SQL queries and clear the promise table
+                    if($promise_count > $this->config['NB_MAX_PROMISE_IN_LOOP']) {
+                        yield \Amp\Promise\all($promises);
+                        $promises = [];
+                        $promise_count = 0;
+                    }
                 }
 
                 foreach ($blueprint->foreignKeys as $foreignKey) {
                     yield $this->restoreForeignKey($foreignKey);
                 }
                 $blueprint->foreignKeys = [];
+
+                foreach ($blueprint->triggers as $key => $trigger) {
+                    yield $this->deleteTrigger($trigger);
+                    unset($blueprint->triggers[$key]);
+                }
             }
         });
     }
@@ -248,26 +255,16 @@ class Anonymizer
     {
         $where = $this->buildWhereForArray($primaryKeyValues);
 
-        $setResults = $this->buildSetForArray($blueprint, $columns, $rowNum, $row);
+        $set = $this->buildSetForArray($columns, $rowNum, $row);
 
         $sql = "UPDATE
                     {$blueprint->table}
                 SET
-                    {$setResults['set']}
+                    {$set}
                 WHERE
                     {$where}";
 
-        $returnPromises = [];
-        $returnPromises[] = $this->mysql_pool->query($sql);
-        if(!empty($setResults['synchro'])) {
-            yield $this->mysql_pool->query($sql);
-            foreach ($setResults['synchro'] as $synchroStatement) {
-                $returnPromises[] = $this->mysql_pool->query($synchroStatement);
-            }
-        } else {
-            $returnPromises[] = $this->mysql_pool->query($sql);
-        }
-        return $returnPromises;
+        return $this->mysql_pool->query($sql);
     }
 
     /**
@@ -319,11 +316,13 @@ class Anonymizer
     /**
      * Build SQL set for key-value array.
      *
-     * @param array $primaryKeyValue
+     * @param array $columns
+     * @param int $rowNum
+     * @param array $row
      *
      * @return string
      */
-    protected function buildSetForArray($blueprint, $columns, $rowNum, $row)
+    protected function buildSetForArray($columns, $rowNum, $row)
     {
         $set = [];
         $synchroStatements = [];
@@ -347,46 +346,9 @@ class Anonymizer
                       ELSE {$column['name']}
                     END)";
             }
-
-            if (isset($blueprint->synchroColumns[$column['name']]) && $originalData !== $row[$column['name']]) {
-                foreach($blueprint->synchroColumns[$column['name']] as $index => $columnInfo) {
-                    $synchroStatements[] = $this->buildSynchroStatement($columnInfo, $row[$column['name']], $originalData);
-                }
-            }
         }
 
-        return [
-            'set' => implode(' ,', $set),
-            'synchro' => $synchroStatements
-        ];
-    }
-
-
-    /**
-     * Build SQL statement for fields need synchonization
-     *
-     * @param Blueprint $blueprint
-     * @param string $newData
-     * @param string $originalData
-     *
-     * @return string
-     */
-    protected function buildSynchroStatement($columnInfo, $newData, $originalData)
-    {
-        if($columnInfo['table'] && $columnInfo['database']) {
-            $table = $columnInfo['database'] . '.' . $columnInfo['table']; 
-        } else {
-            $table = $columnInfo['table'];
-        }
-
-        $sql = "UPDATE
-                    {$table}
-                SET
-                    {$columnInfo['field']}='{$newData}'
-                WHERE
-                    {$columnInfo['field']}='{$originalData}'";
-
-        return $sql;
+        return implode(' ,', $set);
     }
 
 
@@ -496,6 +458,51 @@ class Anonymizer
                 ON UPDATE {$foreignKey['UPDATE_RULE']}
         ";
 
+        return $this->mysql_pool->query($sql);
+    }
+
+    /**
+     * Add a trigger to automatically update related fields when a field is updated
+     *
+     * @param Blueprint $blueprint
+     * @param string $column_name
+     * @param array $data
+     *
+     * @return Promise
+     */
+    protected function addUpdateTrigger(&$blueprint, $column_name, $data)
+    {
+        $trigger_name = "mysql_data_anonymizer_trigger_" . count($blueprint->triggers);
+        $blueprint->triggers[] = $trigger_name; 
+
+        $sql = "
+                DROP TRIGGER IF EXISTS {$trigger_name};
+                CREATE TRIGGER {$trigger_name} AFTER UPDATE 
+                ON {$blueprint->table} FOR EACH ROW BEGIN ";
+
+        foreach ($data as $column_update) {
+            $sql .= "
+                    UPDATE {$column_update['table']}
+                    SET {$column_update['table']}.{$column_update['field']} = NEW.{$column_name}
+                    WHERE {$column_update['table']}.{$column_update['field']} = OLD.{$column_name};
+                ";
+        }
+
+        $sql .= " END";
+
+        return $this->mysql_pool->query($sql);
+    }
+
+    /**
+     * Drop a foreign key by the name
+     *
+     * @param string $trigger_name
+     *
+     * @return Promise
+     */
+    protected function deleteTrigger($trigger_name)
+    {
+        $sql = "DROP TRIGGER IF EXISTS {$trigger_name}";
         return $this->mysql_pool->query($sql);
     }
 }
