@@ -84,6 +84,12 @@ $anonymizer->table('users', function ($table) {
     $table->column('email5')->replaceByFields(function ($rowData) {
         return strtolower($rowData['email4']);
     });
+
+    // Here we assume that there is a foreign key in the table 'class' on the column 'user_id'.
+    // To make sure 'user_id' get updated when we update 'id', use function 'synchronizeColumn'.
+    $table->column('id')->replaceWith(function ($generator) {
+        return $generator->unique()->uuid;
+    })->synchronizeColumn(['user_id', 'class']);
 });
 
 $anonymizer->run();

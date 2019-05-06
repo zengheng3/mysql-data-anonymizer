@@ -9,7 +9,7 @@ $anonymizer = new Anonymizer();
 $anonymizer->table('users', function ($table) {
     
     // Specify a primary key of the table. An array should be passed in for composite key.
-    $table->primary('id')->synchronizeColumn(['user_id', 'group']);
+    $table->primary('id');
 
     // Add a global filter to the queries.
     // Only string is accepted so you need to write down the comlete WHERE statement here.
@@ -41,11 +41,11 @@ $anonymizer->table('users', function ($table) {
         return $rowData['email4'];
     });
 
-    // Here we assume that there is a foreign key in the table 'group' on the column 'user_id'.
+    // Here we assume that there is a foreign key in the table 'class' on the column 'user_id'.
     // To make sure 'user_id' get updated when we update 'id', use function 'synchronizeColumn'.
     $table->column('id')->replaceWith(function ($generator) {
         return $generator->unique()->uuid;
-    })->synchronizeColumn(['individu_id', 'formation']);
+    })->synchronizeColumn(['user_id', 'class']);
 });
 
 $anonymizer->run();
