@@ -140,7 +140,7 @@ class Anonymizer
             }
 
         } catch (Exception $e) {
-            echo 'Exception: ' . $e->getMessage(). PHP_EOL;
+            echo 'Error: ' . $e->getMessage(). PHP_EOL;
             exit(1);
         }
     }
@@ -201,7 +201,8 @@ class Anonymizer
             $promises = [];
             $promise_count = 0;
             yield $this->disableForeignKeyCheck();
-            foreach ($this->blueprints as $table => $blueprint) {
+            foreach ($this->blueprints as $index => $blueprint) {
+                $table = $blueprint->table;
                 foreach ($blueprint->synchroColumns as $column_name => $data) {
                     yield $this->addUpdateTrigger($blueprint, $column_name, $data);
                 }
@@ -250,8 +251,17 @@ class Anonymizer
             $promises = [];
             $promise_count = 0;
             yield $this->disableForeignKeyCheck();
-            foreach ($this->blueprints as $table => $blueprint) {
 
+            $foreignKeyTable = [];
+            $foreignKeys = yield $this->getRelatedForeignKeys(true);
+            while (yield $foreignKeys->advance()) {
+                $foreignKeyTable[] = $foreignKeys->getCurrent();
+            }
+            
+            $this->reorderBlueprints($foreignKeyTable);
+
+            foreach ($this->blueprints as $index => $blueprint) {
+                $table = $blueprint->table;
                 $foreign_keys = yield $this->getRelatedForeignKeys(false, [$table]);
                 $exclude_foreign_keys = [];
                 while(yield $foreign_keys->advance()) {
@@ -274,28 +284,29 @@ class Anonymizer
                 //Update every line selected
                 while (yield $selectData->advance()) {
                     $row = $selectData->getCurrent();
-                    $promises[] = $this->insertLine(
+                    yield $this->disableForeignKeyCheck();
+                    foreach($this->insertLine(
                         $blueprint,
                         Helpers\GeneralHelper::arrayOnly($row, $blueprint->primary),
                         $blueprint->columns,
                         $rowNum,
-                        $row);
+                        $row) as $promise) {
+                        $promises[] = $promise;
 
-                    $promise_count ++;
-                    $rowNum ++;
+                        $promise_count ++;
+                        $rowNum ++;
 
-                    //Wait for all the results of SQL queries and clear the promise table
-                    if($promise_count > $this->config['NB_MAX_PROMISE_IN_LOOP']) {
-                        yield \Amp\Promise\all($promises);
-                        $promises = [];
-                        $promise_count = 0;
+                        //Wait for all the results of SQL queries and clear the promise table
+                        if($promise_count > $this->config['NB_MAX_PROMISE_IN_LOOP']) {
+                            yield \Amp\Promise\all($promises);
+                            $promises = [];
+                            $promise_count = 0;
+                        }
                     }
                 }
             }
 
-            $foreignKeys = yield $this->getRelatedForeignKeys(true);
-             while (yield $foreignKeys->advance()) {
-                $row = $foreignKeys->getCurrent();
+            foreach($foreignKeyTable as $row) {
                 yield $this->restoreForeignKey($row);
             }
         });
@@ -314,7 +325,7 @@ class Anonymizer
     {
         $blueprint = new Blueprint($name, $this->config['DB_NAME'], $callback);
 
-        $this->blueprints[$name] = $blueprint->build();
+        $this->blueprints[] = $blueprint->build();
     }
 
 
@@ -409,14 +420,22 @@ class Anonymizer
      */
     public function insertLine($blueprint, $primaryKeyValues, $columns, $rowNum, $row)
     {
-        $set = $this->buildSetForArray($columns, $rowNum, $row);
+        $set_and_synchro = $this->buildSetForArray($columns, $rowNum, $row, $blueprint);
 
         $sql = "INSERT INTO 
                     {$blueprint->table}
                 SET
-                    {$set}";
+                    {$set_and_synchro['set']}";
 
-        return $this->mysql_pool->query($sql);
+        $returnPromises = [];
+        $returnPromises[] = $this->mysql_pool->query($sql);
+        if(!empty($set_and_synchro['synchro'])) {
+            foreach ($set_and_synchro['synchro'] as $synchroStatement) {
+                $returnPromises[] = $this->mysql_pool->query($synchroStatement);
+            }
+        }
+
+        return $returnPromises;
     }
 
     /**
@@ -482,11 +501,12 @@ class Anonymizer
      *
      * @return string
      */
-    protected function buildSetForArray($columns, $rowNum, $row)
+    protected function buildSetForArray($columns, $rowNum, $row, $blueprint = null)
     {
         $set = [];
+        $synchroStatements = [];
         foreach ($columns as $column) {
-
+            $originalData = $row[$column['name']];
             if (is_callable($column['replaceByFields'])) {
                 $row[$column['name']] = call_user_func($column['replaceByFields'], $row, $this->generator);
             }
@@ -506,6 +526,12 @@ class Anonymizer
                       ELSE {$column['name']}
                     END)";
             }
+
+            if ($this->is_remote && isset($blueprint->synchroColumns[$column['name']]) && $originalData !== $row[$column['name']]) {
+                foreach($blueprint->synchroColumns[$column['name']] as $index => $columnInfo) {
+                    $synchroStatements[] = $this->buildSynchroStatement($columnInfo, $row[$column['name']], $originalData);
+                }
+            }
         }
 
         if ($this->is_remote) {
@@ -521,9 +547,39 @@ class Anonymizer
                     }
                 }
             }
+            
+            return [
+                'set' => implode(' ,', $set),
+                'synchro' => $synchroStatements
+            ];
         }
 
         return implode(' ,', $set);
+    }
+
+    /**
+     * Build SQL statement for fields need synchonization
+     *
+     * @param Blueprint $blueprint
+     * @param string $newData
+     * @param string $originalData
+     *
+     * @return string
+     */
+    protected function buildSynchroStatement($columnInfo, $newData, $originalData)
+    {
+        if($columnInfo['table'] && $columnInfo['database']) {
+            $table = $columnInfo['database'] . '.' . $columnInfo['table']; 
+        } else {
+            $table = $columnInfo['table'];
+        }
+        $sql = "UPDATE
+                    {$table}
+                SET
+                    {$columnInfo['field']}='{$newData}'
+                WHERE
+                    {$columnInfo['field']}='{$originalData}'";
+        return $sql;
     }
 
     /**
@@ -554,7 +610,6 @@ class Anonymizer
         }
 
         $sql .= " END";
-
         return $this->mysql_pool->query($sql);
     }
 
@@ -672,5 +727,94 @@ class Anonymizer
             $sql .= " AND key_column.REFERENCED_TABLE_NAME IN ({$tables})";
         }
         return $this->mysql_pool_source->query($sql);
+    }
+
+    protected function constructDependencyTree($foreign_keys)
+    {
+        $tree = [];
+        foreach ($foreign_keys as $foreign_key) {
+            if(!isset($tree[$foreign_key['REFERENCED_TABLE_NAME']])) {
+                $tree[$foreign_key['REFERENCED_TABLE_NAME']] = [];
+            }
+            if(!in_array($foreign_key['TABLE_NAME'], $tree[$foreign_key['REFERENCED_TABLE_NAME']])) {
+                 $tree[$foreign_key['REFERENCED_TABLE_NAME']][] = $foreign_key['TABLE_NAME'];
+            }
+        }
+        return $tree;
+    }
+
+    protected function addExtraDependenceRelations($tree)
+    {
+        foreach ($this->blueprints as $blueprint) {
+            foreach ($blueprint->synchroColumns as $synchroColumns) {
+                foreach ($synchroColumns as $synchroColumn) {
+                    if ($synchroColumn['database'] && $synchroColumn['database'] != $this->config['DB_NAME_SOURCE']) {
+                        continue;
+                    }
+                    if (!isset($tree[$blueprint->table])) {
+                        $tree[$blueprint->table] = [];
+                    }
+                    if (!in_array($synchroColumn['table'], $tree[$blueprint->table])) {
+                         $tree[$blueprint->table][] = $synchroColumn['table'];
+                    }
+                }
+            }
+        }
+        return $tree;
+    }
+
+    protected function testDependencyTree($tree)
+    {
+        $resolved = [];
+        $tables = array_column($this->blueprints, 'table');
+
+        $tables_to_be_deleted = array_diff($tables, array_keys($tree));
+
+        while(!empty($tables_to_be_deleted)) {
+            $new_tables_to_be_delected = [];
+            foreach($tables_to_be_deleted as $table_to_be_deleted) {
+                foreach ($tree as $index => $node) {
+                    $tree[$index] = array_diff($node, [$table_to_be_deleted]);
+                    if(empty($tree[$index])) {
+                        unset($tree[$index]);
+                        $new_tables_to_be_delected[] = $index;
+                    }
+                }
+                $resolved[] = $table_to_be_deleted;
+            }
+            $tables_to_be_deleted = $new_tables_to_be_delected;
+        }
+
+        return [
+            'success' => empty($tree),
+            'order'   => $resolved,
+            'round'   => $tree
+        ];
+    }
+
+    protected function reorderBlueprints($foreign_keys)
+    {
+        $tree   = $this->constructDependencyTree($foreign_keys);
+        $tree   = $this->addExtraDependenceRelations($tree);
+        $result = $this->testDependencyTree($tree);
+
+        try {
+            if(!$result['success']) {
+                throw new Exception(' The dependent relationship of these tables can not be resolved : ' . implode(",", array_keys($result['round'])));
+            } else {
+                $new_order = $result['order'];
+            }
+        } catch(Exception $e) {
+            echo 'Error: ' . $e->getMessage(). PHP_EOL;
+            exit(1);
+        }
+
+        $new_blueprints = [];
+        foreach ($this->blueprints as $key => $blueprint) {
+            $new_blueprints[array_search($blueprint->table, $new_order)] = $blueprint;
+        }
+
+        ksort($new_blueprints);
+        $this->blueprints = $new_blueprints;
     }
 }
